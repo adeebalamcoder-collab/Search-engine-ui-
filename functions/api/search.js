@@ -2,9 +2,10 @@
 // Path: functions/api/search.js
 // Endpoint: POST /api/search
 //
-// Ordered fallback chain — tries each instance in order, next on failure.
-// Last fallback: env.SEARXNG_URL (your own Cloudflare Worker / Railway instance).
+// Replaces Serper.dev with SearXNG.
+// Requires env variable: SEARXNG_URL (e.g. https://search.inetol.net)
 //
+// API contract is identical to the previous Serper-backed version.
 // Body: { q: "query", type: "search"|"images"|"news"|"videos", page: 1 }
 
 const CORS_HEADERS = {
@@ -13,7 +14,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-const TIMEOUT_MS = 8000;
+const TIMEOUT_MS = 9000; // Stay well under Cloudflare's 10 s CPU limit
 
 // ---------------------------------------------------------------------------
 // Map Atkyn type → SearXNG categories param
@@ -29,11 +30,23 @@ function mapTypeToCategory(type) {
 
 // ---------------------------------------------------------------------------
 // Normalise a single SearXNG result into the shape the frontend expects.
+//
+// SearXNG JSON result fields (actual, from source):
+//   url, title, content, engine, score, category, pretty_url,
+//   publishedDate (news/videos), img_src (images), thumbnail_src (images),
+//   iframe_src (videos), duration (videos), author (videos/news)
+//
+// Serper shapes the frontend currently consumes:
+//   Web    → { title, link, snippet, displayLink, position }
+//   Images → { title, imageUrl, imageWidth, imageHeight, thumbnailUrl,
+//               thumbnailWidth, thumbnailHeight, source, link, position }
+//   News   → { title, link, snippet, date, source, imageUrl, position }
+//   Videos → { title, link, snippet, date, imageUrl, duration, position }
 // ---------------------------------------------------------------------------
 function normaliseResult(item, type, position) {
   const base = {
-    title:    item.title || "",
-    link:     item.url   || "",
+    title:    item.title    || "",
+    link:     item.url      || "",
     position: position,
   };
 
@@ -41,22 +54,25 @@ function normaliseResult(item, type, position) {
     case "images":
       return {
         ...base,
-        imageUrl:        item.img_src       || item.url || "",
-        thumbnailUrl:    item.thumbnail_src || item.img_src || "",
-        source:          item.engine        || "",
-        imageWidth:      item.resolution_x  || 0,
-        imageHeight:     item.resolution_y  || 0,
+        imageUrl:       item.img_src       || item.url || "",
+        thumbnailUrl:   item.thumbnail_src || item.img_src || "",
+        source:         item.engine        || "",
+        // SearXNG does not always provide dimensions; default to 0
+        imageWidth:     item.resolution_x  || 0,
+        imageHeight:    item.resolution_y  || 0,
         thumbnailWidth:  0,
         thumbnailHeight: 0,
       };
+
     case "news":
       return {
         ...base,
-        snippet:  item.content       || "",
-        date:     item.publishedDate || "",
-        source:   item.engine        || "",
-        imageUrl: item.img_src       || item.thumbnail_src || "",
+        snippet:   item.content       || "",
+        date:      item.publishedDate || "",
+        source:    item.engine        || "",
+        imageUrl:  item.img_src       || item.thumbnail_src || "",
       };
+
     case "videos":
       return {
         ...base,
@@ -65,11 +81,12 @@ function normaliseResult(item, type, position) {
         imageUrl: item.thumbnail_src || item.img_src || "",
         duration: item.duration      || "",
       };
-    default:
+
+    default: // "search" / general web
       return {
         ...base,
-        snippet:     item.content    || "",
-        displayLink: item.pretty_url || (() => {
+        snippet:     item.content     || "",
+        displayLink: item.pretty_url  || (() => {
           try { return new URL(item.url).hostname; } catch { return item.url || ""; }
         })(),
       };
@@ -77,53 +94,72 @@ function normaliseResult(item, type, position) {
 }
 
 // ---------------------------------------------------------------------------
-// Build Serper-compatible envelope
+// Build the top-level response envelope that mirrors Serper's shape.
+//
+// Serper top-level keys used by the frontend (by type):
+//   Web    → { searchParameters, organic, answerBox?, knowledgeGraph?, ... }
+//   Images → { searchParameters, images }
+//   News   → { searchParameters, news }
+//   Videos → { searchParameters, videos }
+//
+// SearXNG top-level keys:
+//   query, number_of_results, results[], answers[], corrections[],
+//   suggestions[], infoboxes[]
 // ---------------------------------------------------------------------------
 function buildEnvelope(type, q, page, searxData) {
-  const rawResults  = Array.isArray(searxData.results)     ? searxData.results     : [];
+  const rawResults  = Array.isArray(searxData.results) ? searxData.results : [];
   const suggestions = Array.isArray(searxData.suggestions) ? searxData.suggestions : [];
   const answers     = Array.isArray(searxData.answers)     ? searxData.answers     : [];
 
-  const searchParameters = { q, type, page, engine: "searxng", num: rawResults.length };
-  const normalised      = rawResults.map((item, idx) => normaliseResult(item, type, idx + 1));
+  const searchParameters = {
+    q,
+    type,
+    page,
+    engine: "searxng",
+    num: rawResults.length,
+  };
+
+  // Normalise every result with a 1-based position index
+  const normalised = rawResults.map((item, idx) => normaliseResult(item, type, idx + 1));
+
+  // Related searches — built from SearXNG suggestions
   const relatedSearches = suggestions.slice(0, 8).map(s => ({ query: s }));
 
   switch (type) {
-    case "images": return { searchParameters, images: normalised, relatedSearches };
-    case "news":   return { searchParameters, news:   normalised, relatedSearches };
-    case "videos": return { searchParameters, videos: normalised, relatedSearches };
+    case "images":
+      return { searchParameters, images: normalised, relatedSearches };
+
+    case "news":
+      return { searchParameters, news: normalised, relatedSearches };
+
+    case "videos":
+      return { searchParameters, videos: normalised, relatedSearches };
+
     default: {
-      const envelope = { searchParameters, organic: normalised, relatedSearches };
-      if (answers.length > 0) envelope.answerBox = { answer: answers[0] };
+      // Try to surface an answerBox from SearXNG's answers array
+      let answerBox;
+      if (answers.length > 0) {
+        answerBox = { answer: answers[0] };
+      }
+      const envelope = {
+        searchParameters,
+        organic: normalised,
+        relatedSearches,
+      };
+      if (answerBox) envelope.answerBox = answerBox;
       return envelope;
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Try one SearXNG instance — resolves with parsed data or throws
+// Fetch with an AbortController-based timeout
 // ---------------------------------------------------------------------------
-async function tryInstance(baseUrl, params) {
+async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const url = `${baseUrl}/search?${params.toString()}`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { "Accept": "application/json", "User-Agent": "AtkyniSearchProxy/1.0" },
-      signal: controller.signal,
-    });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const ct = res.headers.get("content-type") || "";
-    if (!ct.includes("application/json")) throw new Error(`Non-JSON content-type: ${ct}`);
-
-    const data = await res.json();
-    if (!Array.isArray(data.results)) throw new Error("No results[] array");
-
-    return data;
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -134,6 +170,15 @@ async function tryInstance(baseUrl, params) {
 // ---------------------------------------------------------------------------
 export async function onRequestPost(context) {
   const { request, env } = context;
+
+  // Validate SEARXNG_URL is configured
+  const searxngBase = (env.SEARXNG_URL || "").replace(/\/+$/, "");
+  if (!searxngBase) {
+    return new Response(
+      JSON.stringify({ error: "SEARXNG_URL environment variable is not set." }),
+      { status: 500, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
 
   let body;
   try {
@@ -156,6 +201,7 @@ export async function onRequestPost(context) {
     );
   }
 
+  // Build SearXNG request URL
   const params = new URLSearchParams({
     q,
     format:     "json",
@@ -164,69 +210,65 @@ export async function onRequestPost(context) {
     safesearch: "1",
   });
 
-  // ---------------------------------------------------------------------------
-  // Ordered fallback chain
-  // 1. Railway (your own instance)        ← env.SEARXNG_URL
-  // 2. https://search.pereira.is
-  // 3. https://search.inetol.net
-  // 4. https://searx.tiekoetter.com
-  // 5. https://paulgo.io
-  // 6. https://xka.cz
-  // 7. https://searx.be
-  // 8. Cloudflare Worker                  ← env.SEARXNG_URL (same var, last resort)
-  //    (if Railway is down, this is the final safety net)
-  // ---------------------------------------------------------------------------
-  const railwayBase = (env.SEARXNG_URL || "").replace(/\/+$/, "");
+  const searxngUrl = `${searxngBase}/search?${params.toString()}`;
 
-  const chain = [
-    ...(railwayBase ? [railwayBase] : []),   // 1. your Railway instance
-    "https://search.pereira.is",             // 2.
-    "https://search.inetol.net",             // 3.
-    "https://searx.tiekoetter.com",          // 4.
-    "https://paulgo.io",                     // 5.
-    "https://xka.cz",                        // 6.
-    "https://searx.be",                      // 7.
-  ];
-
-  let searxData = null;
-  for (const base of chain) {
-    try {
-      searxData = await tryInstance(base, params);
-      break; // got a valid response, stop
-    } catch {
-      // this instance failed, try next
-    }
-  }
-
-  // 8. Last resort — Cloudflare Worker (same SEARXNG_URL but via its own /api/search)
-  if (!searxData && railwayBase) {
-    try {
-      const workerRes = await fetch(`${railwayBase}/api/search`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ q, type, page }),
-        signal:  AbortSignal.timeout(TIMEOUT_MS),
-      });
-      if (workerRes.ok) {
-        const envelope = await workerRes.json();
-        return new Response(JSON.stringify(envelope), {
-          status: 200,
-          headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...CORS_HEADERS },
-        });
-      }
-    } catch { /* final fallback also failed */ }
-  }
-
-  if (!searxData) {
+  let searxRes;
+  try {
+    searxRes = await fetchWithTimeout(
+      searxngUrl,
+      {
+        method: "GET",
+        headers: {
+          "Accept":     "application/json",
+          "User-Agent": "AtkyniSearchProxy/1.0",
+        },
+      },
+      TIMEOUT_MS
+    );
+  } catch (err) {
+    const isTimeout = err && err.name === "AbortError";
     return new Response(
-      JSON.stringify({ error: "All search instances failed or timed out." }),
+      JSON.stringify({
+        error:  isTimeout ? "SearXNG request timed out." : "Failed to reach SearXNG.",
+        detail: String(err),
+      }),
+      { status: 504, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  // Handle non-200 from SearXNG
+  if (!searxRes.ok) {
+    let detail = "";
+    try { detail = await searxRes.text(); } catch { /* ignore */ }
+    return new Response(
+      JSON.stringify({
+        error:  `SearXNG returned HTTP ${searxRes.status}.`,
+        detail: detail.slice(0, 500),
+      }),
       { status: 502, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
     );
   }
 
-  return new Response(JSON.stringify(buildEnvelope(type, q, page, searxData)), {
+  let searxData;
+  try {
+    searxData = await searxRes.json();
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: "SearXNG returned non-JSON response.", detail: String(err) }),
+      { status: 502, headers: { "Content-Type": "application/json", ...CORS_HEADERS } }
+    );
+  }
+
+  // Build Serper-compatible envelope and return
+  const envelope = buildEnvelope(type, q, page, searxData);
+
+  return new Response(JSON.stringify(envelope), {
     status: 200,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...CORS_HEADERS },
+    headers: {
+      "Content-Type":                "application/json",
+      "Cache-Control":               "no-store",
+      ...CORS_HEADERS,
+    },
   });
 }
 
@@ -238,4 +280,4 @@ export async function onRequestOptions() {
     status: 204,
     headers: CORS_HEADERS,
   });
-}
+                               }
