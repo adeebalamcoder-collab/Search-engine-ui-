@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Atkyn — fast Internet search</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+    .hamburger-btn {
+      position: fixed; top: 12px; right: 14px;
+      border: none; background: none; cursor: pointer; padding: 10px;
+      border-radius: 50%; display: grid; grid-template-columns: 1fr 1fr; gap: 2.5px;
+      width: 44px; height: 44px; box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .hamburger-btn span {
+      display: block; width: 10px; height: 10px;
+      background: linear-gradient(145deg, #5a5a5a, #2e2e2e); border-radius: 3px;
+    }
+    .hamburger-btn:active { background: rgba(0,0,0,0.07); }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+      background: #fff;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 0 22px;
+      padding-bottom: 20vh;
+    }
+
+    .logo-img {
+      height: 112px;
+      object-fit: contain;
+      display: block;
+      margin-bottom: 52px;
+      color: transparent;
+      font-size: 0;
+      image-rendering: -webkit-optimize-contrast;
+      image-rendering: crisp-edges;
+      filter: none;
+    }
+
+    .search-wrap {
+      width: 100%;
+      max-width: 580px;
+      position: relative;
+    }
+
+    .search-pill {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      border: 2px solid #F34655;
+      border-radius: 100px;
+      padding: 0 18px 0 20px;
+      height: 66px;
+      background: #fff;
+      gap: 12px;
+      position: relative;
+      z-index: 10;
+      transition: border-color 0.18s ease;
+    }
+    .search-pill:focus-within {
+      border-color: #e02235;
+    }
+    @media (hover: hover) {
+      .search-pill:hover { }
+    }
+
+    @media (min-width: 900px) {
+      body { padding-bottom: 24vh; }
+    }
+
+    .ico-search { flex-shrink: 0; color: #F34655; display: flex; align-items: center; }
+    .ico-search svg { width: 24px; height: 24px; }
+
+    .input-wrap {
+      flex: 1;
+      position: relative;
+      height: 100%;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-input {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      outline: none;
+      background: transparent;
+      font-size: 1.08rem;
+      font-weight: 400;
+      font-family: inherit;
+      color: #1a1a1a;
+      padding: 0;
+      z-index: 2;
+      caret-color: #F34655;
+      letter-spacing: 0.01em;
+    }
+    .search-input::placeholder { color: transparent; }
+
+    .shimmer-text {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      pointer-events: none;
+      z-index: 1;
+      overflow: hidden;
+    }
+    .shimmer-text span {
+      font-size: 1.08rem;
+      white-space: nowrap;
+      letter-spacing: 0.01em;
+      background: linear-gradient(90deg,
+        #b0bec5 0%, #b0bec5 25%,
+        #F34655 48%, #F34655 52%,
+        #b0bec5 75%, #b0bec5 100%);
+      background-size: 300% auto;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: sweep 3.5s 1s linear infinite;
+    }
+    @keyframes sweep {
+      0%   { background-position: 150% center; }
+      100% { background-position: -150% center; }
+    }
+    .search-input:not(:placeholder-shown) + .shimmer-text { display: none; }
+
+    .ico-camera {
+      flex-shrink: 0;
+      border: none;
+      background: none;
+      cursor: pointer;
+      color: #F34655;
+      display: flex;
+      align-items: center;
+      padding: 4px;
+      border-radius: 50%;
+      transition: background 0.12s;
+    }
+    .ico-camera:active { background: rgba(243,70,85,0.10); }
+    .ico-camera svg { width: 24px; height: 24px; }
+
+    .suggestions {
+      position: absolute;
+      top: calc(100% + 10px);
+      left: 0;
+      right: 0;
+      background: #fff;
+      border-radius: 18px;
+      overflow: hidden;
+      z-index: 9;
+      box-shadow:
+        0 2px 8px rgba(0,0,0,0.07),
+        0 8px 32px rgba(0,0,0,0.11);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(-4px);
+      transition: opacity 0.15s ease, transform 0.15s ease;
+    }
+    .suggestions.show {
+      opacity: 1;
+      pointer-events: all;
+      transform: translateY(0);
+    }
+
+    .suggestion-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      cursor: pointer;
+      font-size: 0.97rem;
+      color: #1a1a1a;
+      transition: background 0.1s;
+      border: none;
+      background: none;
+      width: 100%;
+      text-align: left;
+      font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .suggestion-item:hover,
+    .suggestion-item.active { background: #fef5f6; }
+    .suggestion-item + .suggestion-item { border-top: 1px solid #f0f2f4; }
+
+    .sug-icon { color: #F34655; opacity: 0.5; flex-shrink: 0; }
+    .sug-icon svg { width: 15px; height: 15px; }
+  </style>
+</head>
+<body>
+
+  <button class="hamburger-btn" aria-label="Menu">
+    <span></span><span></span><span></span><span></span>
+  </button>
+
+  <img class="logo-img" src="Atkyn.png" alt="Atkyn">
+
+  <div class="search-wrap" id="searchWrap">
+    <div class="search-pill">
+      <span class="ico-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7.5"/><line x1="21" y1="21" x2="16.8" y2="16.8"/>
+        </svg>
+      </span>
+
+      <div class="input-wrap">
+        <input class="search-input" type="text" id="q" placeholder=" " autocomplete="off" />
+        <div class="shimmer-text"><span>Search with Atkyn AI</span></div>
+      </div>
+
+      <button class="ico-camera" aria-label="Visual search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="suggestions" id="suggestions"></div>
+  </div>
+
+  <script>
+    const input = document.getElementById('q');
+    const box   = document.getElementById('suggestions');
+    let active  = -1;
+    let timer;
+
+    function showSug() { box.classList.add('show'); }
+    function hideSug() { box.classList.remove('show'); active = -1; }
+
+    function fetchSuggestions(q) {
+      return new Promise((resolve) => {
+        const cb = 'sg_' + Date.now();
+        const s  = document.createElement('script');
+        s.src = `https://suggestqueries.google.com/complete/search?client=firefox&q=${encodeURIComponent(q)}&callback=${cb}`;
+        window[cb] = (data) => { resolve(data[1] || []); delete window[cb]; s.remove(); };
+        s.onerror = () => { resolve([]); s.remove(); };
+        document.head.appendChild(s);
+      });
+    }
+
+    function render(items) {
+      if (!items.length) { hideSug(); return; }
+      box.innerHTML = items.slice(0, 6).map(s => `
+        <button class="suggestion-item" data-val="${s.replace(/"/g,'&quot;')}" onmousedown="pick(this)">
+          <span class="sug-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+          </span>
+          ${s}
+        </button>`).join('');
+      showSug();
+      active = -1;
+    }
+
+    function pick(el) {
+      input.value = el.dataset.val;
+      hideSug();
+      doSearch();
+    }
+
+    input.addEventListener('input', function () {
+      const q = this.value.trim();
+      clearTimeout(timer);
+      if (!q) { hideSug(); return; }
+      timer = setTimeout(async () => {
+        const items = await fetchSuggestions(q);
+        render(items);
+      }, 200);
+    });
+
+    input.addEventListener('keydown', function (e) {
+      const items = box.querySelectorAll('.suggestion-item');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        active = Math.min(active + 1, items.length - 1);
+        items.forEach((el, i) => el.classList.toggle('active', i === active));
+        if (items[active]) input.value = items[active].dataset.val;
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        active = Math.max(active - 1, -1);
+        items.forEach((el, i) => el.classList.toggle('active', i === active));
+      } else if (e.key === 'Enter') {
+        hideSug(); doSearch();
+      } else if (e.key === 'Escape') {
+        hideSug();
+      }
+    });
+
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('#searchWrap')) hideSug();
+    });
+
+    function doSearch() {
+      const q = input.value.trim();
+      if (q) window.location.href = 'search.html?q=' + encodeURIComponent(q);
+    }
+  </script>
+
+</body>
+</html>
